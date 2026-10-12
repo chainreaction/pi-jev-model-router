@@ -266,77 +266,82 @@ function statusLine(ctx: ExtensionContext, runtime: Runtime): void {
 }
 
 /**
- * The routing policy as a table: what each task kind gets at its floor tier and
- * once the demand reaches the top tier. Read from this config and pi's model
- * catalogue, so it is deterministic and costs nothing — the table to budget
- * against.
+ * The routing policy as a table: one row per task kind, one column per tier, and
+ * each cell showing the model and thinking level that really serves it. Read from
+ * this config and pi's model catalogue, so it is deterministic and costs nothing —
+ * the table to budget against.
  *
- * `grouped` merges kinds that resolve to the same row, because pi clips
- * extension widgets to ten lines (`MAX_WIDGET_LINES`).
+ * It is appended to the transcript once at session start (never drawn as a widget,
+ * never sent to the LLM) so it stays in the scrollback.
  */
-function policyTable(runtime: Runtime, grouped: boolean): string[] {
+function policyTable(runtime: Runtime): string[] {
   const config = runtime.config;
   const eligibility = eligibilityFor(runtime);
-  const hardest: Tier = config.routes.xpremium.length > 0 ? "xpremium" : "premium";
+  const tiers = TIERS.filter(
+    (tier) => tier !== "xpremium" || config.routes.xpremium.length > 0,
+  );
 
+  /** What actually serves this kind at this tier: kind chain first, then the tier chain. */
   const cell = (kind: string, tier: Tier): string => {
-    const chain = kindCandidates(config, kind, tierIndex(tier));
+    const index = tierIndex(tier);
+    const chain = kindCandidates(config, kind, index);
     const pick =
       firstAvailable(runtime.models, chain, eligibility) ??
       firstAvailable(runtime.models, config.routes[tier], eligibility);
+    const servedByKind = pick !== undefined &&
+      chain.some((t) => t.provider === pick.target.provider && t.model === pick.target.model);
     const model = pick?.target.model ?? config.routes[tier][0]?.model ?? "—";
     const level =
-      chain.find((target) => target.thinkingLevel)?.thinkingLevel ??
+      (servedByKind ? pick?.target.thinkingLevel : undefined) ??
       config.routes[tier].find((target) => target.thinkingLevel)?.thinkingLevel ??
-      "?";
-    return `${model}·${level}${pick ? "" : "?"}`;
+      "off";
+    return `${shortModel(model)}·${level}${pick ? "" : "?"}`;
   };
 
   interface Row {
-    kinds: string[];
+    kind: string;
     floor: Tier;
-    atMin: string;
-    top: string;
+    cells: string[];
   }
 
-  const flat: Row[] = Object.keys(config.taskKinds)
+  const rows: Row[] = Object.keys(config.taskKinds)
     .sort()
-    .map((kind) => {
-      const floor = (config.kindMinimumTier[kind] ?? "quick") as Tier;
-      return { kinds: [kind], floor, atMin: cell(kind, floor), top: cell(kind, hardest) };
-    });
+    .map((kind) => ({
+      kind,
+      floor: (config.kindMinimumTier[kind] ?? "quick") as Tier,
+      cells: tiers.map((tier) => cell(kind, tier)),
+    }))
+    .sort(
+      (a, b) => tierIndex(a.floor) - tierIndex(b.floor) || a.kind.localeCompare(b.kind),
+    );
 
-  const merged = new Map<string, Row>();
-  for (const row of flat) {
-    const key = `${row.floor}|${row.atMin}|${row.top}`;
-    const found = merged.get(key);
-    if (found) found.kinds.push(row.kinds[0]);
-    else merged.set(key, { ...row, kinds: [...row.kinds] });
-  }
-  const rows = (grouped ? [...merged.values()] : flat).sort(
-    (a, b) => tierIndex(a.floor) - tierIndex(b.floor) || a.kinds[0].localeCompare(b.kinds[0]),
-  );
-
-  const wKind = Math.max(4, ...rows.map((row) => row.kinds.join("/").length));
-  const wFloor = Math.max(3, ...rows.map((row) => row.floor.length));
-  const wMin = Math.max(6, ...rows.map((row) => row.atMin.length));
-  const wTop = Math.max(hardest.length, ...rows.map((row) => row.top.length));
+  const widths = [
+    Math.max(4, ...rows.map((row) => row.kind.length)),
+    Math.max(5, ...rows.map((row) => row.floor.length)),
+    ...tiers.map((tier, i) => Math.max(tier.length, ...rows.map((row) => row.cells[i].length))),
+  ];
 
   const cell2 = (text: string, width: number): string => ` ${text.padEnd(width)} `;
   const rule = (left: string, mid: string, right: string): string =>
-    left + [wKind, wFloor, wMin, wTop].map((w) => "─".repeat(w + 2)).join(mid) + right;
-  const line = (a: string, b: string, c: string, d: string): string =>
-    `│${cell2(a, wKind)}│${cell2(b, wFloor)}│${cell2(c, wMin)}│${cell2(d, wTop)}│`;
+    left + widths.map((w) => "─".repeat(w + 2)).join(mid) + right;
+  const line = (...fields: string[]): string =>
+    `│${fields.map((f, i) => cell2(f, widths[i])).join("│")}│`;
 
   return [
-    `pi-jev · ${config.enabled ? "" : "ROUTER OFF · "}kind → model·thinking (config, 0 tokens)`,
+    `pi-jev · ${config.enabled ? "" : "ROUTER OFF · "}kind × tier → model·thinking (config, 0 tokens)`,
+    `floor = minimum tier for that kind; empty cells serve from a lower tier`,
     rule("┌", "┬", "┐"),
-    line("kind", "min", "at min", hardest),
+    line("kind", "floor", ...tiers),
     rule("├", "┼", "┤"),
-    ...rows.map((row) => line(row.kinds.join("/"), row.floor, row.atMin, row.top)),
+    ...rows.map((row) => line(row.kind, row.floor, ...row.cells)),
     rule("└", "┴", "┘"),
     `budget ≥${Math.round(config.budget.softRatio * 100)}% → tier down, ≥${Math.round(config.budget.hardRatio * 100)}% → quick/standard · cache miss ≤${formatUsd(config.cache.maxPenaltyUsd)}`,
   ];
+}
+
+/** `deepseek/deepseek-v4-pro` → `v4-pro`, `deepseek-flash` → `flash` (column width matters). */
+function shortModel(model: string): string {
+  return model.replace(/^deepseek\//, "").replace(/^deepseek-/, "");
 }
 
 /** Durable, TUI-only copy of the full table (never sent to the LLM). */
@@ -763,7 +768,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     }
     runtime.appliedTierIndex = tierForModel(currentModelKey(ctx), runtime.config);
     statusLine(ctx, runtime);
-    if (runtime.config.policyTable !== false) appendPolicyEntry(policyTable(runtime, false));
+    if (runtime.config.policyTable !== false) appendPolicyEntry(policyTable(runtime));
     if (runtime.config.enabled && !hasApiKey(runtime.config)) {      notify(ctx, 
         `pi-jev-model-router: no API key. Set ${runtime.config.apiKeyEnv} or add "apiKey" to ~/.pi/agent/pi-jev-model-router.json.`,
         "warning",
@@ -882,7 +887,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
             notify(ctx, "usage: /jev-router table [full]", "warning");
             return;
           }
-          appendPolicyEntry(policyTable(runtime, false));
+          appendPolicyEntry(policyTable(runtime));
           notify(ctx, "policy table appended to the transcript", "info");
           return;
         }

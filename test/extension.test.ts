@@ -643,15 +643,48 @@ describe("policy table", () => {
     const header = rows[0];
     const body = rows.slice(1);
 
+    // The matrix is kind × tier: one column per configured tier, xpremium dropped
+    // when it holds nothing.
     expect(header).toContain("kind");
-    expect(header).toContain("min");
-    expect(header).toContain("at min");
+    expect(header).toContain("floor");
+    expect(header).toContain("quick");
+    expect(header).toContain("standard");
+    expect(header).toContain("high");
+    expect(header).toContain("premium");
+    expect(header).not.toContain("xpremium");
     for (const kind of ["implement", "refactor", "research", "debug", "plan", "review", "chat", "explain", "operate", "write"]) {
       expect(body.some((row) => row.includes(` ${kind} `) || row.includes(`/${kind} `))).toBe(true);
     }
-    // standard tier pins thinkingLevel "low" in the test config; quick does not.
-    expect(body.find((row) => row.includes(" implement "))!).toContain("std-a·low");
-    expect(body.find((row) => row.includes(" chat "))!).toContain("quick-a·");
+    // The test config pins thinkingLevel "low" on standard and nothing on quick,
+    // so a cell shows the level of the tier that actually serves it.
+    const implement = body.find((row) => row.includes(" implement "))!;
+    expect(implement).toContain("std-a·low");
+    expect(implement).toContain("prem-a·off");
+    const chat = body.find((row) => row.includes(" chat "))!;
+    expect(chat).toContain("quick-a·off");
+  });
+
+  test("a kind specialist wins its cell once the floor reaches its minTier", async () => {
+    stubFetch(() => Response.json(jevAnswers("debug", 1)));
+    const { entries } = await load({
+      cfg: {
+        kindModels: {
+          debug: [
+            { provider: "testprov", model: "quick-a", thinkingLevel: "low", minTier: "standard" },
+            { provider: "testprov", model: "prem-a", minTier: "premium" },
+          ],
+        },
+      },
+    });
+    const [table] = policyEntries(entries);
+    const cells = tableOf(table).find((line) => line.includes(" debug "))!.split("│").map((c) => c.trim());
+    // split("│") yields a leading empty field: [0]="", [1]=kind, [2]=floor, [3..]=tiers
+    expect(cells[2]).toBe("standard");
+    expect(cells[3]).toBe("quick-a·off"); // quick: specialist not eligible yet
+    expect(cells[4]).toBe("quick-a·low"); // standard: the specialist's own level
+    // premium (index 6): once the tier reaches the specialist's minTier, kindCandidates
+    // sorts it ahead of the cheaper one, so pro takes over — the row mirrors the code.
+    expect(cells[6]).toBe("prem-a·off");
   });
 
   test("policyTable=false skips the entry entirely", async () => {
