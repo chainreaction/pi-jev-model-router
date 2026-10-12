@@ -72,6 +72,8 @@ interface DecisionEntry {
   pressure: number;
   reason: string;
   notes: string[];
+  /** Thinking level the router applied for this prompt, when it owns the knob. */
+  thinkingLevel?: string;
   /** Set when the router deliberately did not consult Jev for this prompt. */
   skipReason?: string;
   blocked?: boolean;
@@ -132,6 +134,7 @@ function appendDecisionEntry(
       pressure: decision.budgetPressure,
       reason: decision.reason,
       notes: [...decision.notes],
+      thinkingLevel: decision.thinkingLevel,
       at: Date.now(),
     },
     runtime,
@@ -436,12 +439,19 @@ async function applyDecision(
       return { action: "skipped", message: "current model is quota-ineligible", blocked };
     }
     if (decision.notes.some((note) => note.includes("codex"))) notify(ctx, decision.notes.join("\n"), "warning");
+    // The model stays, but the level is still a per-prompt judgment. This branch used
+    // to return before `setThinking`, so the knob was left to whatever session-level
+    // value happened to be active — which is how a hand-set `off` used to disappear.
+    const levelApplied = applyThinking(decision.thinkingLevel, ctx);
     runtime.appliedTierIndex = decision.tierIndex;
     runtime.lastDecision = decision;
     runtime.lastAnalysis = analysis;
-    setStatus(ctx, `jev-router:${decision.tier} ✓`);
+    setStatus(ctx, `jev-router:${decision.tier}${levelApplied ? `·${decision.thinkingLevel}` : ""} ✓`);
     appendDecisionEntry(analysis, decision, "kept", runtime);
-    return { action: "kept", message: `${headline} — already active` };
+    return {
+      action: "kept",
+      message: `${headline} — already active${levelApplied ? ` (thinking ${decision.thinkingLevel})` : ""}`,
+    };
   }
 
   if (runtime.config.mode === "notify") {
@@ -524,9 +534,7 @@ async function applyDecision(
   }
 
   if (previous && previous !== `${model.provider}/${model.id}`) runtime.previousModelKey = previous;
-  if (decision.target.thinkingLevel) {
-    setThinking(decision.target.thinkingLevel);
-  }
+  applyThinking(decision.thinkingLevel ?? decision.target.thinkingLevel, ctx);
 
   runtime.appliedTierIndex = decision.tierIndex;
   runtime.lastDecision = decision;
@@ -548,6 +556,20 @@ async function switchModel(model: unknown): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Apply the level the route asked for. The router owns this knob, so the level is
+ * applied on every decision, not only when the model switches. No-op when the level
+ * is already active, so the session log does not fill up with identical changes.
+ */
+function applyThinking(level: string | undefined, ctx: ExtensionContext): boolean {
+  if (!level) return false;
+  // `thinkingLevel` is absent in some older builds; treat that as "unknown".
+  const current = (ctx as { thinkingLevel?: string }).thinkingLevel;
+  if (current === level) return false;
+  setThinking(level);
+  return true;
 }
 
 function setThinking(level: string): void {
