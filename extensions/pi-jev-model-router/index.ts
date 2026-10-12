@@ -6,7 +6,7 @@
  * deserves, then route the turn to the matching model tier. Code applies the
  * budget policy; Jev only judges the task.
  *
- * Commands:  /jev-router [status|on|off|mode|budget|why|revert|suggest [--write]]
+ * Commands:  /jev-router [status|on|off|mode|budget|table|why|revert|suggest [--write]]
  *            /jev-route <text>
  * Tool:      jev_route
  */
@@ -15,7 +15,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Type } from "typebox";
-import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig } from "./config";
+import { apiKeyFor, configPaths, hasApiKey, loadConfig, TIERS, type JevRouterConfig, type Tier } from "./config";
 import { loadScores, suggestRoutes } from "./ranking";
 import { CodexQuotaCache, quotaEligibility } from "./quota";
 import {
@@ -36,6 +36,7 @@ import {
   describeKindRoutes,
   describeDecision,
   firstAvailable,
+  kindCandidates,
   tierIndex,
   tierForModel,
   type AvailableModel,
@@ -262,6 +263,95 @@ function statusLine(ctx: ExtensionContext, runtime: Runtime): void {
   if (spend.pressure > 0) parts.push(`${Math.round(spend.pressure * 100)}%`);
   if (runtime.config.mode !== "auto") parts.push(runtime.config.mode);
   setStatus(ctx, parts.join(" · "));
+}
+
+/**
+ * The routing policy as a table: what each task kind gets at its floor tier and
+ * once the demand reaches the top tier. Read from this config and pi's model
+ * catalogue, so it is deterministic and costs nothing — the table to budget
+ * against.
+ *
+ * `grouped` merges kinds that resolve to the same row, because pi clips
+ * extension widgets to ten lines (`MAX_WIDGET_LINES`).
+ */
+function policyTable(runtime: Runtime, grouped: boolean): string[] {
+  const config = runtime.config;
+  const eligibility = eligibilityFor(runtime);
+  const hardest: Tier = config.routes.xpremium.length > 0 ? "xpremium" : "premium";
+
+  const cell = (kind: string, tier: Tier): string => {
+    const chain = kindCandidates(config, kind, tierIndex(tier));
+    const pick =
+      firstAvailable(runtime.models, chain, eligibility) ??
+      firstAvailable(runtime.models, config.routes[tier], eligibility);
+    const model = pick?.target.model ?? config.routes[tier][0]?.model ?? "—";
+    const level =
+      chain.find((target) => target.thinkingLevel)?.thinkingLevel ??
+      config.routes[tier].find((target) => target.thinkingLevel)?.thinkingLevel ??
+      "?";
+    return `${model}·${level}${pick ? "" : "?"}`;
+  };
+
+  interface Row {
+    kinds: string[];
+    floor: Tier;
+    atMin: string;
+    top: string;
+  }
+
+  const flat: Row[] = Object.keys(config.taskKinds)
+    .sort()
+    .map((kind) => {
+      const floor = (config.kindMinimumTier[kind] ?? "quick") as Tier;
+      return { kinds: [kind], floor, atMin: cell(kind, floor), top: cell(kind, hardest) };
+    });
+
+  const merged = new Map<string, Row>();
+  for (const row of flat) {
+    const key = `${row.floor}|${row.atMin}|${row.top}`;
+    const found = merged.get(key);
+    if (found) found.kinds.push(row.kinds[0]);
+    else merged.set(key, { ...row, kinds: [...row.kinds] });
+  }
+  const rows = (grouped ? [...merged.values()] : flat).sort(
+    (a, b) => tierIndex(a.floor) - tierIndex(b.floor) || a.kinds[0].localeCompare(b.kinds[0]),
+  );
+
+  const wKind = Math.max(4, ...rows.map((row) => row.kinds.join("/").length));
+  const wFloor = Math.max(3, ...rows.map((row) => row.floor.length));
+  const wMin = Math.max(6, ...rows.map((row) => row.atMin.length));
+  return [
+    `pi-jev · ${config.enabled ? "" : "ROUTER OFF · "}kind → model·thinking (config, 0 tokens)`,
+    `${"kind".padEnd(wKind)}  ${"min".padEnd(wFloor)}  ${"at min".padEnd(wMin)}  ${hardest}`,
+    ...rows.map((row) =>
+      `${row.kinds.join("/").padEnd(wKind)}  ${row.floor.padEnd(wFloor)}  ${row.atMin.padEnd(wMin)}  ${row.top}`,
+    ),
+    `budget ≥${Math.round(config.budget.softRatio * 100)}% → tier down, ≥${Math.round(config.budget.hardRatio * 100)}% → quick/standard · cache miss ≤${formatUsd(config.cache.maxPenaltyUsd)}`,
+  ];
+}
+
+/** Draw the policy table above the editor; a no-op where the TUI does not exist. */
+function renderPolicyTable(ctx: ExtensionContext, runtime: Runtime): void {
+  try {
+    if (typeof ctx.ui?.setWidget !== "function") return;
+    if (runtime.config.policyTable === false || !runtime.config.enabled) {
+      ctx.ui.setWidget("jev-router-policy", undefined);
+      return;
+    }
+    ctx.ui.setWidget("jev-router-policy", policyTable(runtime, true), { placement: "aboveEditor" });
+  } catch {
+    // print/json sessions have no widget surface
+  }
+}
+
+/** Durable, TUI-only copy of the full table (never sent to the LLM). */
+function appendPolicyEntry(lines: string[]): void {
+  if (!api || typeof api.appendEntry !== "function") return;
+  try {
+    api.appendEntry<{ lines: string[] }>("jev-router-policy", { lines });
+  } catch {
+    // entries unavailable in this build
+  }
 }
 
 function eligibilityFor(runtime: Runtime): TargetEligibility {
@@ -654,6 +744,11 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
         }
         return box;
       });
+      pi.registerEntryRenderer<{ lines: string[] }>("jev-router-policy", (entry, _options, theme) => {
+        const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+        for (const line of entry.data?.lines ?? []) box.addChild(new Text(line, 0, 0));
+        return box;
+      });
     } catch {
       // TUI rendering unavailable in this build: decisions are still reported
       // through the status bar and notify, and persist as session entries.
@@ -673,6 +768,8 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     }
     runtime.appliedTierIndex = tierForModel(currentModelKey(ctx), runtime.config);
     statusLine(ctx, runtime);
+    renderPolicyTable(ctx, runtime);
+    appendPolicyEntry(policyTable(runtime, false));
     if (runtime.config.enabled && !hasApiKey(runtime.config)) {
       notify(ctx, 
         `pi-jev-model-router: no API key. Set ${runtime.config.apiKeyEnv} or add "apiKey" to ~/.pi/agent/pi-jev-model-router.json.`,
@@ -700,6 +797,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     runtime.models = toAvailable(ctx);
     runtime.appliedTierIndex = tierForModel(currentModelKey(ctx), runtime.config);
     statusLine(ctx, runtime);
+    renderPolicyTable(ctx, runtime);
   });
 
   // Spend accounting: every assistant message carries its computed cost.
@@ -786,6 +884,27 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
           statusLine(ctx, runtime);
           notify(ctx, "jev-router disabled", "info");
           return;
+        case "table": {
+          const value = (rest[0] ?? "").toLowerCase();
+          if (value === "full") {
+            appendPolicyEntry(policyTable(runtime, false));
+            notify(ctx, "policy table appended to the transcript", "info");
+            return;
+          }
+          if (value && value !== "on" && value !== "off") {
+            notify(ctx, "usage: /jev-router table [on|off|full]", "warning");
+            return;
+          }
+          runtime.config.policyTable =
+            value === "on" ? true : value === "off" ? false : !(runtime.config.policyTable ?? true);
+          renderPolicyTable(ctx, runtime);
+          notify(
+            ctx,
+            `policy table: ${runtime.config.policyTable ? "on" : "off"} (session only — persist it as "policyTable" in pi-jev-model-router.json)`,
+            "info",
+          );
+          return;
+        }
         case "mode": {
           const mode = (rest[0] ?? "").toLowerCase();
           if (mode !== "auto" && mode !== "confirm" && mode !== "notify") {
@@ -947,7 +1066,7 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
             "",
             runtime.lastDecision ? `last: ${describeDecision(runtime.lastDecision)}` : "last: none",
             "",
-            "commands: /jev-router on|off|mode|budget|why|revert|suggest [--write] · /jev-route <text>",
+            "commands: /jev-router on|off|mode|budget|table|why|revert|suggest [--write] · /jev-route <text>",
           ];
           notify(ctx, lines.join("\n"), "info");
           return;
