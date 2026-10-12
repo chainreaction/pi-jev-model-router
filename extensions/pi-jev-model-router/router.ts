@@ -1,4 +1,4 @@
-import type { JevRouterConfig, RouteTarget, Tier } from "./config";
+import type { JevRouterConfig, RouteTarget, ThinkingLevel, Tier } from "./config";
 import { TIERS } from "./config";
 import type { SpendSnapshot } from "./budget";
 import { formatUsd } from "./budget";
@@ -38,6 +38,12 @@ export interface Decision {
   kindSpecialised: boolean;
   /** True when the router deliberately stayed put to preserve the prompt cache. */
   held?: boolean;
+  /**
+   * Thinking level this route wants for the current prompt. Resolved from the chain
+   * that serves it, so the level moves even when the model does not. `undefined`
+   * means no chain named a level and the knob should be left alone.
+   */
+  thinkingLevel?: ThinkingLevel;
   reason: string;
   notes: string[];
 }
@@ -167,6 +173,11 @@ export function targetForModel(config: JevRouterConfig, model: AvailableModel): 
   return { provider: model.provider, model: model.id };
 }
 
+/** Thinking level a tier asks for: the first one named in its chain, if any. */
+function levelForTier(config: JevRouterConfig, tier: Tier): ThinkingLevel | undefined {
+  return config.routes[tier]?.find((target) => target.thinkingLevel)?.thinkingLevel;
+}
+
 /**
  * Compose the Jev judgments into a tier, then apply affordability and availability.
  *
@@ -275,6 +286,12 @@ export function decide(
   const usedKindChain = kindChain.some(
     (t) => t.provider === available.target.provider && t.model === available.target.model,
   );
+  // The router owns the thinking level, so every decision carries the level the
+  // judgment asked for — including turns where the model stays put. A kind
+  // specialist may name its own level; otherwise the wanted tier's chain decides.
+  const thinkingLevel =
+    (usedKindChain ? available.target.thinkingLevel : undefined) ??
+    levelForTier(config, TIERS[desiredIndex]);
   if (freePool.some((t) => t.provider === available.target.provider && t.model === available.target.model)) {
     notes.push(`free pool → ${available.model.id}`);
   }
@@ -340,6 +357,7 @@ export function decide(
         lowConfidenceFallback,
         kindSpecialised: false,
         held: true,
+        thinkingLevel,
         reason:
           `${analysis.kind} · complexity ${analysis.complexity.toFixed(2)}/3 · ` +
           `capability ${analysis.budgetIntensity.toFixed(2)}/3 · reasoning ${analysis.deepReasoning.toFixed(2)}` +
@@ -365,6 +383,7 @@ export function decide(
     downgraded,
     lowConfidenceFallback,
     kindSpecialised: usedKindChain,
+    thinkingLevel,
     reason,
     notes,
   };
