@@ -172,6 +172,12 @@ export interface JevRouterConfig {
   taskKinds: Record<string, string>;
   ranking: RankingConfig;
   confirm: ConfirmConfig;
+  /**
+   * Draw the routing policy table (task kind → model · thinking level) as a
+   * widget above the editor when a session starts. Built from this config and
+   * pi's model catalogue only, never from Jev, so it spends no tokens.
+   */
+  policyTable?: boolean;
   quota: { "openai-codex"?: CodexQuotaConfig };
 }
 
@@ -306,6 +312,7 @@ export const DEFAULT_CONFIG: JevRouterConfig = {
     maxPenaltyUsd: 0.05,
     bypassTierDelta: 2,
   },
+  policyTable: true,
   free: {
     enabled: false,
     policy: "prefer",
