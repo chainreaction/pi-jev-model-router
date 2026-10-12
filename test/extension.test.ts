@@ -61,13 +61,15 @@ function stubFetch(respond: () => Response): void {
   }) as typeof fetch;
 }
 
-async function load(options: { minimal?: boolean; answer?: string | undefined; select?: string; current?: { provider: string; id: string }; models?: typeof models; token?: string } = {}) {
+async function load(options: { minimal?: boolean; answer?: string | undefined; select?: string; current?: { provider: string; id: string }; models?: typeof models; token?: string; ui?: Record<string, unknown>; cfg?: Record<string, unknown> } = {}) {
+  if (options.cfg) writeProjectConfig({ apiKey: "test-key", ...options.cfg });
   const availableModels = options.models ?? models;
   const handlers = new Map<string, Handler>();
   const commands = new Map<string, Command>();
   const setModel: unknown[] = [];
   const thinking: unknown[] = [];
   const dialogs: Array<{ title: string; placeholder?: string; opts?: unknown; options?: string[] }> = [];
+  const entries: Array<{ type: string; data: unknown }> = [];
   let answer = options.answer;
   const selectAnswer = options.select;
   const fake: Record<string, unknown> = { on: (event: string, handler: Handler) => handlers.set(event, handler) };
@@ -75,7 +77,7 @@ async function load(options: { minimal?: boolean; answer?: string | undefined; s
     Object.assign(fake, {
       registerCommand: (name: string, command: Command) => commands.set(name, command),
       registerTool: () => {},
-      appendEntry: () => {},
+      appendEntry: (type: string, data: unknown) => entries.push({ type, data }),
       setModel: async (model: unknown) => (setModel.push(model), true),
       setThinkingLevel: (level: unknown) => thinking.push(level),
     });
@@ -102,6 +104,7 @@ async function load(options: { minimal?: boolean; answer?: string | undefined; s
         dialogs.push({ title, placeholder, opts });
         return answer;
       },
+      ...options.ui,
     },
     sessionManager: { buildContextEntries: () => [] },
     getContextUsage: () => ({ tokens: 0 }),
@@ -111,7 +114,7 @@ async function load(options: { minimal?: boolean; answer?: string | undefined; s
   if (options.token) await new Promise((resolve) => setTimeout(resolve, 0));
   const input = (text: string, source = "interactive") => handlers.get("input")!({ text, source }, ctx);
   const command = (name: string, args = "") => commands.get(name)!.handler(args, ctx);
-  return { input, command, notes, setModel, thinking, dialogs, setAnswer: (v: string | undefined) => { answer = v } };
+  return { input, command, notes, setModel, thinking, dialogs, entries, setAnswer: (v: string | undefined) => { answer = v } };
 }
 
 beforeEach(() => {
@@ -606,5 +609,61 @@ describe("pi extension", () => {
       await command("jev-router", "suggest");
       expect(notes.at(-1)).toEqual([expect.stringContaining(scoresFile), "warning"]);
     });
+  });
+});
+
+describe("policy table", () => {
+  const policyEntries = (entries: Array<{ type: string; data: unknown }>) =>
+    entries.filter((entry) => entry.type === "jev-router-policy").map((entry) => (entry.data as { lines: string[] }).lines);
+  const tableOf = (lines: string[]) => lines.filter((line) => /^[┌│├└]/.test(line));
+
+  test("is appended once at session start as a bordered table, not drawn as a widget", async () => {
+    let widgetCalls = 0;
+    const widgetted = { setWidget: () => (widgetCalls += 1), setStatus: () => {} };
+    stubFetch(() => Response.json(jevAnswers("implement", 1)));
+    const { entries } = await load({ ui: widgetted as never });
+
+    const tables = policyEntries(entries);
+    expect(tables).toHaveLength(1);
+    expect(widgetCalls).toBe(0);
+
+    const lines = tableOf(tables[0]);
+    const width = lines[0].length;
+    expect(lines[0].startsWith("┌")).toBe(true);
+    expect(lines.some((line) => line.startsWith("└"))).toBe(true);
+    for (const line of lines) expect(line.length).toBe(width);
+    expect(lines.filter((line) => line.startsWith("│"))).toHaveLength(11);
+  });
+
+  test("every task kind has a row, the border closes, and the thinking level comes from the tier route", async () => {
+    stubFetch(() => Response.json(jevAnswers("implement", 1)));
+    const { entries } = await load();
+    const [table] = policyEntries(entries);
+    const rows = tableOf(table).filter((line) => line.startsWith("│"));
+    const header = rows[0];
+    const body = rows.slice(1);
+
+    expect(header).toContain("kind");
+    expect(header).toContain("min");
+    expect(header).toContain("at min");
+    for (const kind of ["implement", "refactor", "research", "debug", "plan", "review", "chat", "explain", "operate", "write"]) {
+      expect(body.some((row) => row.includes(` ${kind} `) || row.includes(`/${kind} `))).toBe(true);
+    }
+    // standard tier pins thinkingLevel "low" in the test config; quick does not.
+    expect(body.find((row) => row.includes(" implement "))!).toContain("std-a·low");
+    expect(body.find((row) => row.includes(" chat "))!).toContain("quick-a·");
+  });
+
+  test("policyTable=false skips the entry entirely", async () => {
+    stubFetch(() => Response.json(jevAnswers("implement", 1)));
+    const { entries } = await load({ cfg: { policyTable: false } });
+    expect(policyEntries(entries)).toHaveLength(0);
+  });
+
+  test("/jev-router table appends the table again on demand", async () => {
+    stubFetch(() => Response.json(jevAnswers("implement", 1)));
+    const { entries, command } = await load();
+    await command("jev-router", "table");
+    expect(policyEntries(entries)).toHaveLength(2);
   });
 });

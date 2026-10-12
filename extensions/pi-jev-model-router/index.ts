@@ -320,28 +320,23 @@ function policyTable(runtime: Runtime, grouped: boolean): string[] {
   const wKind = Math.max(4, ...rows.map((row) => row.kinds.join("/").length));
   const wFloor = Math.max(3, ...rows.map((row) => row.floor.length));
   const wMin = Math.max(6, ...rows.map((row) => row.atMin.length));
+  const wTop = Math.max(hardest.length, ...rows.map((row) => row.top.length));
+
+  const cell2 = (text: string, width: number): string => ` ${text.padEnd(width)} `;
+  const rule = (left: string, mid: string, right: string): string =>
+    left + [wKind, wFloor, wMin, wTop].map((w) => "─".repeat(w + 2)).join(mid) + right;
+  const line = (a: string, b: string, c: string, d: string): string =>
+    `│${cell2(a, wKind)}│${cell2(b, wFloor)}│${cell2(c, wMin)}│${cell2(d, wTop)}│`;
+
   return [
     `pi-jev · ${config.enabled ? "" : "ROUTER OFF · "}kind → model·thinking (config, 0 tokens)`,
-    `${"kind".padEnd(wKind)}  ${"min".padEnd(wFloor)}  ${"at min".padEnd(wMin)}  ${hardest}`,
-    ...rows.map((row) =>
-      `${row.kinds.join("/").padEnd(wKind)}  ${row.floor.padEnd(wFloor)}  ${row.atMin.padEnd(wMin)}  ${row.top}`,
-    ),
+    rule("┌", "┬", "┐"),
+    line("kind", "min", "at min", hardest),
+    rule("├", "┼", "┤"),
+    ...rows.map((row) => line(row.kinds.join("/"), row.floor, row.atMin, row.top)),
+    rule("└", "┴", "┘"),
     `budget ≥${Math.round(config.budget.softRatio * 100)}% → tier down, ≥${Math.round(config.budget.hardRatio * 100)}% → quick/standard · cache miss ≤${formatUsd(config.cache.maxPenaltyUsd)}`,
   ];
-}
-
-/** Draw the policy table above the editor; a no-op where the TUI does not exist. */
-function renderPolicyTable(ctx: ExtensionContext, runtime: Runtime): void {
-  try {
-    if (typeof ctx.ui?.setWidget !== "function") return;
-    if (runtime.config.policyTable === false || !runtime.config.enabled) {
-      ctx.ui.setWidget("jev-router-policy", undefined);
-      return;
-    }
-    ctx.ui.setWidget("jev-router-policy", policyTable(runtime, true), { placement: "aboveEditor" });
-  } catch {
-    // print/json sessions have no widget surface
-  }
 }
 
 /** Durable, TUI-only copy of the full table (never sent to the LLM). */
@@ -768,10 +763,8 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     }
     runtime.appliedTierIndex = tierForModel(currentModelKey(ctx), runtime.config);
     statusLine(ctx, runtime);
-    renderPolicyTable(ctx, runtime);
-    appendPolicyEntry(policyTable(runtime, false));
-    if (runtime.config.enabled && !hasApiKey(runtime.config)) {
-      notify(ctx, 
+    if (runtime.config.policyTable !== false) appendPolicyEntry(policyTable(runtime, false));
+    if (runtime.config.enabled && !hasApiKey(runtime.config)) {      notify(ctx, 
         `pi-jev-model-router: no API key. Set ${runtime.config.apiKeyEnv} or add "apiKey" to ~/.pi/agent/pi-jev-model-router.json.`,
         "warning",
       );
@@ -797,7 +790,6 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
     runtime.models = toAvailable(ctx);
     runtime.appliedTierIndex = tierForModel(currentModelKey(ctx), runtime.config);
     statusLine(ctx, runtime);
-    renderPolicyTable(ctx, runtime);
   });
 
   // Spend accounting: every assistant message carries its computed cost.
@@ -886,23 +878,12 @@ export default async function jevRouterExtension(pi: ExtensionAPI): Promise<void
           return;
         case "table": {
           const value = (rest[0] ?? "").toLowerCase();
-          if (value === "full") {
-            appendPolicyEntry(policyTable(runtime, false));
-            notify(ctx, "policy table appended to the transcript", "info");
+          if (value && value !== "full") {
+            notify(ctx, "usage: /jev-router table [full]", "warning");
             return;
           }
-          if (value && value !== "on" && value !== "off") {
-            notify(ctx, "usage: /jev-router table [on|off|full]", "warning");
-            return;
-          }
-          runtime.config.policyTable =
-            value === "on" ? true : value === "off" ? false : !(runtime.config.policyTable ?? true);
-          renderPolicyTable(ctx, runtime);
-          notify(
-            ctx,
-            `policy table: ${runtime.config.policyTable ? "on" : "off"} (session only — persist it as "policyTable" in pi-jev-model-router.json)`,
-            "info",
-          );
+          appendPolicyEntry(policyTable(runtime, false));
+          notify(ctx, "policy table appended to the transcript", "info");
           return;
         }
         case "mode": {

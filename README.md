@@ -127,7 +127,7 @@ disabled. No configuration is required — sensible defaults are built in.
 | `/jev-router budget monthly 150` | Session-only monthly cap |
 | `/jev-router why` | Re-run Jev on the last prompt and show the full judgment + decision trace |
 | `/jev-router revert` | Switch back to the model that was active before the last auto-switch |
-| `/jev-router table [on\|off\|full]` | Toggle the resolved-policy table widget; `full` appends the per-kind table to the transcript |
+| `/jev-router table` | Append the resolved-policy table to the transcript again |
 | `/jev-router suggest` | Rank your scored models into proposed `routes` / `kindModels` and print them (see [Ranking models from your own scores](#ranking-models-from-your-own-scores)) |
 | `/jev-router suggest --write` | Same, and save it as a generated config layer that your own config overrides |
 | `/jev-route <text>` | Classify arbitrary text and show the recommendation without switching |
@@ -167,19 +167,27 @@ no tokens:
 
 ```
 pi-jev · kind → model·thinking (config, 0 tokens)
-kind                         min       at min              xpremium
-chat/explain/operate/write   quick     deepseek-flash·off  deepseek-v4-pro·off
-debug                        standard  deepseek-flash·low  deepseek-v4-pro·off
-implement/refactor/research  standard  deepseek-flash·off  deepseek-v4-pro·off
-plan/review                  high      deepseek-flash·low  deepseek-v4-pro·off
+┌───────────┬──────────┬────────────────────┬─────────────────────┐
+│ kind      │ min      │ at min             │ xpremium            │
+├───────────┼──────────┼────────────────────┼─────────────────────┤
+│ chat      │ quick    │ deepseek-flash·off │ deepseek-v4-pro·off │
+│ explain   │ quick    │ deepseek-flash·off │ deepseek-v4-pro·off │
+│ operate   │ quick    │ deepseek-flash·off │ deepseek-v4-pro·off │
+│ write     │ quick    │ deepseek-flash·off │ deepseek-v4-pro·off │
+│ debug     │ standard │ deepseek-flash·low │ deepseek-v4-pro·off │
+│ implement │ standard │ deepseek-flash·off │ deepseek-v4-pro·off │
+│ refactor  │ standard │ deepseek-flash·off │ deepseek-v4-pro·off │
+│ research  │ standard │ deepseek-flash·off │ deepseek-v4-pro·off │
+│ plan      │ high     │ deepseek-flash·low │ deepseek-v4-pro·off │
+│ review    │ high     │ deepseek-flash·low │ deepseek-v4-pro·off │
+└───────────┴──────────┴────────────────────┴─────────────────────┘
 budget ≥70% → tier down, ≥90% → quick/standard · cache miss ≤$0.050
 ```
 
-It is drawn above the editor at session start — kinds that resolve to the same
-row are merged, because pi clips widgets to ten lines — and appended to the
-transcript as a full per-kind entry, so it stays in the scrollback. Toggle the
-widget with `/jev-router table off`, print the full table again with
-`/jev-router table full`.
+It is appended to the transcript **once**, at session start — no widget, nothing
+pinned above the editor — and retained in the scrollback. Print it again on
+demand with `/jev-router table`. Set `policyTable: false` in the config to skip
+it entirely.
 
 ## Which models it uses by default
 
@@ -760,7 +768,7 @@ to the pool. Check the provider's data policy before enabling it.
 | `quota` | disabled | Cached Codex 5h/weekly remaining-quota floors, independent of spend |
 | `budget` | no caps | Spend policy |
 | `cache` | `aware`, cap `$0.05`, deadband `0.25` | Prompt-cache-aware switching |
-| `policyTable` | `true` | Show the resolved routing policy as a table above the editor at session start; the full per-kind table is appended to the transcript and never sent to the LLM |
+| `policyTable` | `true` | Append the resolved routing policy table (task kind → model · thinking level) to the transcript once at session start; never sent to the LLM |
 | `stateFile` | `~/.pi/agent/pi-jev-model-router-state.json` | Spend ledger |
 
 ## Failure behaviour
